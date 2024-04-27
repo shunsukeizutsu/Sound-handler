@@ -1,3 +1,8 @@
+/*
+* SSMから音声データを取得し、再生するプログラム
+* author Shunsuke.I
+* date : 2024/04/28
+*/
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
@@ -5,11 +10,7 @@
 #include <ssm.hpp>
 #include <pulse/error.h>  /* pulseaudio */
 #include <pulse/simple.h> /* pulseaudio */
-#include "recordmusic.hpp"
-
-#define APP_NAME "pulseaudio_sample"
-#define STREAM_NAME "play"
-#define DATA_SIZE 1024
+#include "record.hpp"
 
 static void ctrlC(int aStatus);
 static void setSigInt();
@@ -19,29 +20,30 @@ static void setupSSM(void);
 static int gShutOff = 0;
 static unsigned int dT = 10; // 10ms
 
-static SSMApi<rec_music, rec_music_property> *PYMUSIC;
+static SSMApi<rec_sound, rec_sound_property> *PLAYBACK;
 
 int main()
 {
-    SSMApi<rec_music, rec_music_property> pymusic(RECORDMUSIC_SNAME, 0);
-    PYMUSIC = &pymusic;
-    rec_music *pydata = &pymusic.data;
+    SSMApi<rec_sound, rec_sound_property> pymusic(SOUNDHANDLER_SNAME, 0);
+    PLAYBACK = &pymusic;
+    rec_sound *pydata = &pymusic.data;
 
-    int pa_errno, pa_result, read_bytes;
+    pa_simple *playback_stream;
+    pa_sample_spec playback_spec;
+    float buf[BUF_SIZE / SAMPLE_SIZE];
+    int pa_errno, pa_result, written_bytes;
 
-    pa_sample_spec ss;
-    ss.format = PA_SAMPLE_S16LE;
-    ss.rate = 48000;
-    ss.channels = 1;
+    // 再生用のパラメータ使用
+    playback_spec.format = PA_SAMPLE_FLOAT32LE;
+    playback_spec.rate = SAMPLE_RATE;
+    playback_spec.channels = CHANNELS;
 
-    pa_simple *pa = pa_simple_new(NULL, APP_NAME, PA_STREAM_PLAYBACK, NULL, STREAM_NAME, &ss, NULL, NULL, &pa_errno);
-    if (pa == NULL)
+    playback_stream = pa_simple_new(NULL, "playback", PA_STREAM_PLAYBACK, NULL, "playback", &playback_spec, NULL, NULL, &pa_errno);
+    if (playback_stream == NULL)
     {
         fprintf(stderr, "ERROR: Failed to connect pulseaudio server: %s\n", pa_strerror(pa_errno));
-        return 1;
+        return EXIT_FAILURE;
     }
-
-    char data[DATA_SIZE];
     try
     {
         setupSSM();
@@ -64,13 +66,14 @@ int main()
             }
             if (update[INDEX_MUSIC])
             {
-                pa_result = pa_simple_write(pa, pydata->data, sizeof(pydata->data), &pa_errno);
+                pa_result = pa_simple_write(playback_stream, pydata->buf, sizeof(pydata->buf), &pa_errno);
                 if (pa_result < 0)
                 {
                     fprintf(stderr, "ERROR: Failed to write data to pulseaudio: %s\n", pa_strerror(pa_errno));
-                    return 1;
+                    return EXIT_FAILURE;
                 }
             }
+            usleep(dT * 1000);
         }
     }
     catch (std::runtime_error const &error)
@@ -82,7 +85,7 @@ int main()
         std::cout << "An unknown fatal error has occured. Aborting." << std::endl;
     }
 
-    pa_simple_free(pa);
+    pa_simple_free(playback_stream);
     Terminate();
     return EXIT_SUCCESS;
 }
@@ -100,7 +103,7 @@ static void setSigInt()
 }
 static void Terminate(void)
 {
-    PYMUSIC->release();
+    PLAYBACK->release();
     endSSM();
     printf("\nend\n");
 }
@@ -112,11 +115,11 @@ static void setupSSM(void)
     else
         std::cerr << "OK.\n";
 
-    // play music
-    std::cerr << "open play music ... ";
-    if (!PYMUSIC->open(SSM_READ))
+    //
+    std::cerr << "open sound ... ";
+    if (!PLAYBACK->open(SSM_READ))
     {
-        throw std::runtime_error("[\033[1m\033[31mERROR\033[30m\033[0m]:fail to open play music on ssm.\n");
+        throw std::runtime_error("[\033[1m\033[31mERROR\033[30m\033[0m]:fail to open sound on ssm.\n");
     }
     else
     {

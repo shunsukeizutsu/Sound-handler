@@ -1,7 +1,13 @@
 cmake_minimum_required(VERSION 3.13)
 project(music)
-add_executable(playmusic ./src/pmusic.cpp)
-target_link_libraries(playmusic pulse-simple pulse m ssm)
+add_executable(playback ./src/playback.cpp)
+target_link_libraries(playback pulse-simple pulse m ssm)
 
-add_executable(recordmusic ./src/recordmusic.cpp)
-target_link_libraries(recordmusic pulse-simple pulse m ssm)
+add_executable(record ./src/record.cpp)
+target_link_libraries(record pulse-simple pulse m ssm)
+
+#add_executable(psound ./src/psound.cpp)
+#target_link_libraries(psound -lportaudio)
+
+#add_executable(pulsesound ./src/pulsesound.cpp)
+#target_link_libraries(pulsesound pulse-simple pulse m ssm)
