@@ -1,3 +1,8 @@
+/*
+* マイクから音声データを取得してSSMに送るプログラム
+* author Shunsuke.I
+* date : 2024/04/28
+*/
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
