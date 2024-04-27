@@ -2,6 +2,9 @@
 
 SSMから取得した音声データを再生プログラム
 
+pulseAudioのインストール
+sudo apt-get install libpulse-dev
+
 実行方法
 1. mkdir bin
 2. cd bin
