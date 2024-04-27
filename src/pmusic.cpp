@@ -1,122 +1,125 @@
-/***
-  This file is part of PulseAudio.
-
-  PulseAudio is free software; you can redistribute it and/or modify
-  it under the terms of the GNU Lesser General Public License as published
-  by the Free Software Foundation; either version 2.1 of the License,
-  or (at your option) any later version.
-
-  PulseAudio is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with PulseAudio; if not, see <http://www.gnu.org/licenses/>.
-***/
-
-#ifdef HAVE_CONFIG_H
-#include <config.h>
-#endif
-
-#include <stdio.h>
-#include <unistd.h>
-#include <string.h>
 #include <errno.h>
-#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <ssm.hpp>
+#include <pulse/error.h>  /* pulseaudio */
+#include <pulse/simple.h> /* pulseaudio */
+#include "recordmusic.hpp"
 
-#include <pulse/simple.h>
-#include <pulse/error.h>
+#define APP_NAME "pulseaudio_sample"
+#define STREAM_NAME "play"
+#define DATA_SIZE 1024
 
-#define BUFSIZE 1024
+static void ctrlC(int aStatus);
+static void setSigInt();
+static void Terminate(void);
+static void setupSSM(void);
 
-int main(int argc, char *argv[])
+static int gShutOff = 0;
+static unsigned int dT = 10; // 10ms
+
+static SSMApi<rec_music, rec_music_property> *PYMUSIC;
+
+int main()
 {
+    SSMApi<rec_music, rec_music_property> pymusic(RECORDMUSIC_SNAME, 0);
+    PYMUSIC = &pymusic;
+    rec_music *pydata = &pymusic.data;
 
-    /* The Sample format to use */
-    static const pa_sample_spec ss = {
-        .format = PA_SAMPLE_S16LE,
-        .rate = 44100,
-        .channels = 2};
+    int pa_errno, pa_result, read_bytes;
 
-    pa_simple *s = NULL;
-    int ret = 1;
-    int error;
+    pa_sample_spec ss;
+    ss.format = PA_SAMPLE_S16LE;
+    ss.rate = 48000;
+    ss.channels = 1;
 
-    /* replace STDIN with the specified file if needed */
-    if (argc > 1)
+    pa_simple *pa = pa_simple_new(NULL, APP_NAME, PA_STREAM_PLAYBACK, NULL, STREAM_NAME, &ss, NULL, NULL, &pa_errno);
+    if (pa == NULL)
     {
-        int fd;
-
-        if ((fd = open(argv[1], O_RDONLY)) < 0)
-        {
-            fprintf(stderr, __FILE__ ": open() failed: %s\n", strerror(errno));
-            goto finish;
-        }
-
-        if (dup2(fd, STDIN_FILENO) < 0)
-        {
-            fprintf(stderr, __FILE__ ": dup2() failed: %s\n", strerror(errno));
-            goto finish;
-        }
-
-        close(fd);
+        fprintf(stderr, "ERROR: Failed to connect pulseaudio server: %s\n", pa_strerror(pa_errno));
+        return 1;
     }
 
-    /* Create a new playback stream */
-    if (!(s = pa_simple_new(NULL, argv[0], PA_STREAM_PLAYBACK, NULL, "playback", &ss, NULL, NULL, &error)))
+    char data[DATA_SIZE];
+    try
     {
-        fprintf(stderr, __FILE__ ": pa_simple_new() failed: %s\n", pa_strerror(error));
-        goto finish;
-    }
-
-    for (;;)
-    {
-        uint8_t buf[BUFSIZE];
-        ssize_t r;
-
-#if 0
-        pa_usec_t latency;
- 
-        if ((latency = pa_simple_get_latency(s, &error)) == (pa_usec_t) -1) {
-            fprintf(stderr, __FILE__": pa_simple_get_latency() failed: %s\n", pa_strerror(error));
-            goto finish;
-        }
- 
-        fprintf(stderr, "%0.0f usec    \r", (float)latency);
-#endif
-
-        /* Read some data ... */
-        if ((r = read(STDIN_FILENO, buf, sizeof(buf))) <= 0)
+        setupSSM();
+        setSigInt();
+        bool update[1] = {false};
+        SSM_tid update_id[1] = {-1};
+#define INDEX_MUSIC 0
+        while (!gShutOff)
         {
-            if (r == 0) /* EOF */
-                break;
-
-            fprintf(stderr, __FILE__ ": read() failed: %s\n", strerror(errno));
-            goto finish;
-        }
-
-        /* ... and play it */
-        if (pa_simple_write(s, buf, (size_t)r, &error) < 0)
-        {
-            fprintf(stderr, __FILE__ ": pa_simple_write() failed: %s\n", pa_strerror(error));
-            goto finish;
+            update[INDEX_MUSIC] = false;
+            if (update_id[INDEX_MUSIC] < getTID_top(pymusic.getSSMId()))
+            {
+                pymusic.readLast();
+                update[INDEX_MUSIC] = true; // 最新情報を読み込む
+                update_id[INDEX_MUSIC] = pymusic.timeId;
+            }
+            else
+            {
+                update[INDEX_MUSIC] = false;
+            }
+            if (update[INDEX_MUSIC])
+            {
+                pa_result = pa_simple_write(pa, pydata->data, sizeof(pydata->data), &pa_errno);
+                if (pa_result < 0)
+                {
+                    fprintf(stderr, "ERROR: Failed to write data to pulseaudio: %s\n", pa_strerror(pa_errno));
+                    return 1;
+                }
+            }
         }
     }
-
-    /* Make sure that every single sample was played */
-    if (pa_simple_drain(s, &error) < 0)
+    catch (std::runtime_error const &error)
     {
-        fprintf(stderr, __FILE__ ": pa_simple_drain() failed: %s\n", pa_strerror(error));
-        goto finish;
+        std::cout << error.what() << std::endl;
+    }
+    catch (...)
+    {
+        std::cout << "An unknown fatal error has occured. Aborting." << std::endl;
     }
 
-    ret = 0;
+    pa_simple_free(pa);
+    Terminate();
+    return EXIT_SUCCESS;
+}
+static void ctrlC(int aStatus)
+{
+    signal(SIGINT, NULL);
+    gShutOff = true;
+}
+static void setSigInt()
+{
+    struct sigaction sig;
+    memset(&sig, 0, sizeof(sig));
+    sig.sa_handler = ctrlC;
+    sigaction(SIGINT, &sig, NULL);
+}
+static void Terminate(void)
+{
+    PYMUSIC->release();
+    endSSM();
+    printf("\nend\n");
+}
+static void setupSSM(void)
+{
+    std::cerr << "initializing ssm ... ";
+    if (!initSSM())
+        throw std::runtime_error("[\033[1m\033[31mERROR\033[30m\033[0m]:fail to initialize ssm.");
+    else
+        std::cerr << "OK.\n";
 
-finish:
-
-    if (s)
-        pa_simple_free(s);
-
-    return ret;
+    // play music
+    std::cerr << "open play music ... ";
+    if (!PYMUSIC->open(SSM_READ))
+    {
+        throw std::runtime_error("[\033[1m\033[31mERROR\033[30m\033[0m]:fail to open play music on ssm.\n");
+    }
+    else
+    {
+        std::cerr << "OK.\n";
+    }
 }

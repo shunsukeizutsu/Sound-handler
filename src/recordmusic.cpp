@@ -1,100 +1,116 @@
-/***
-  This file is part of PulseAudio.
-
-  PulseAudio is free software; you can redistribute it and/or modify
-  it under the terms of the GNU Lesser General Public License as published
-  by the Free Software Foundation; either version 2.1 of the License,
-  or (at your option) any later version.
-
-  PulseAudio is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public License
-  along with PulseAudio; if not, see <http://www.gnu.org/licenses/>.
-***/
-
-#ifdef HAVE_CONFIG_H
-#include <config.h>
-#endif
-
-#include <stdio.h>
-#include <unistd.h>
-#include <string.h>
 #include <errno.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <ssm.hpp>
+#include <pulse/error.h>  /* pulseaudio */
+#include <pulse/simple.h> /* pulseaudio */
+#include "recordmusic.hpp"
 
-#include <pulse/simple.h>
-#include <pulse/error.h>
+#define APP_NAME "pulseaudio_sample"
+#define STREAM_NAME "rec"
+#define DATA_SIZE 1024
 
-#define BUFSIZE 1024
+static void ctrlC(int aStatus);
+static void setSigInt();
+static void Terminate(void);
+static void setupSSM(void);
 
-/* A simple routine calling UNIX write() in a loop */
-static ssize_t loop_write(int fd, const void *data, size_t size)
+static int gShutOff = 0;
+static unsigned int dT = 10; // 10ms
+
+static SSMApi<rec_music, rec_music_property> *REMUSIC;
+
+int main(int aArgc, char *aArgv[])
 {
-    ssize_t ret = 0;
+    SSMApi<rec_music, rec_music_property> remusic(RECORDMUSIC_SNAME, 0);
+    REMUSIC = &remusic;
+    rec_music *redata = &remusic.data;
+    int pa_errno, pa_result, written_bytes;
 
-    while (size > 0)
+    pa_sample_spec ss;
+    ss.format = PA_SAMPLE_S16LE;
+    ss.rate = 48000;
+    ss.channels = 1;
+    pa_simple *pa = pa_simple_new(NULL, APP_NAME, PA_STREAM_RECORD, NULL, STREAM_NAME, &ss, NULL, NULL, &pa_errno);
+    if (pa == NULL)
     {
-        ssize_t r;
+        fprintf(stderr, "ERROR: Failed to connect pulseaudio server: %s\n", pa_strerror(pa_errno));
+        return 1;
+    }
+    try
+    {
+        setupSSM();
+        setSigInt();
 
-        if ((r = write(fd, data, size)) < 0)
-            return r;
+        char data[DATA_SIZE];
+        while (!gShutOff)
+        {
+            pa_result = pa_simple_read(pa, data, DATA_SIZE, &pa_errno);
+            if (pa_result < 0)
+            {
+                fprintf(stderr, "ERROR: Failed to read data from pulseaudio: %s\n", pa_strerror(pa_errno));
+                return EXIT_FAILURE;
+            }
 
-        if (r == 0)
-            break;
-
-        ret += r;
-        data = (const uint8_t *)data + r;
-        size -= (size_t)r;
+            memcpy(data,redata->data,strlen(redata->data)+1);
+            /*written_bytes = write(STDOUT_FILENO, data, DATA_SIZE);
+            if (written_bytes < DATA_SIZE)
+            {
+                fprintf(stderr, "ERROR: Failed to write data to stdout: %s\n", strerror(errno));
+                return EXIT_FAILURE;
+            }*/
+            remusic.write();
+            usleep(dT * 1000);
+        }
+    }
+    catch (std::runtime_error const &error)
+    {
+        std::cout << error.what() << std::endl;
+    }
+    catch (...)
+    {
+        std::cout << "An unknown fatal error has occured. Aborting." << std::endl;
     }
 
-    return ret;
+    pa_simple_free(pa);
+    Terminate();
+    return EXIT_SUCCESS;
 }
-
-int main(int argc, char *argv[])
+static void ctrlC(int aStatus)
 {
-    /* The sample type to use */
-    static const pa_sample_spec ss = {
-        .format = PA_SAMPLE_S16LE,
-        .rate = 44100,
-        .channels = 2};
-    pa_simple *s = NULL;
-    int ret = 1;
-    int error;
+    signal(SIGINT, NULL);
+    gShutOff = true;
+}
+static void setSigInt()
+{
+    struct sigaction sig;
+    memset(&sig, 0, sizeof(sig));
+    sig.sa_handler = ctrlC;
+    sigaction(SIGINT, &sig, NULL);
+}
+static void Terminate(void)
+{
+    REMUSIC->release();
+    endSSM();
+    printf("\nend\n");
+}
+static void setupSSM(void)
+{
+    std::cerr << "initializing ssm ... ";
+    if (!initSSM())
+        throw std::runtime_error("[\033[1m\033[31mERROR\033[30m\033[0m]:fail to initialize ssm.");
+    else
+        std::cerr << "OK.\n";
 
-    /* Create the recording stream */
-    if (!(s = pa_simple_new(NULL, argv[0], PA_STREAM_RECORD, NULL, "record", &ss, NULL, NULL, &error)))
+    // Localizer1作成
+    std::cerr << "create remusic ... ";
+    if (!REMUSIC->create(1, (double)dT / 1000.0))
     {
-        fprintf(stderr, __FILE__ ": pa_simple_new() failed: %s\n", pa_strerror(error));
-        goto finish;
+        throw std::runtime_error("[\033[1m\033[31mERROR\033[30m\033[0m]:fail to create remusic on ssm.\n");
     }
-
-    for (;;)
+    else
     {
-        uint8_t buf[BUFSIZE];
-
-        /* Record some data ... */
-        if (pa_simple_read(s, buf, sizeof(buf), &error) < 0)
-        {
-            fprintf(stderr, __FILE__ ": pa_simple_read() failed: %s\n", pa_strerror(error));
-            goto finish;
-        }
-
-        /* And write it to STDOUT */
-        if (loop_write(STDOUT_FILENO, buf, sizeof(buf)) != sizeof(buf))
-        {
-            fprintf(stderr, __FILE__ ": write() failed: %s\n", strerror(errno));
-            goto finish;
-        }
+        std::cerr << "OK.\n";
     }
-
-    ret = 0;
-
-finish:
-
-    if (s)
-        pa_simple_free(s);
-
-    return ret;
 }
